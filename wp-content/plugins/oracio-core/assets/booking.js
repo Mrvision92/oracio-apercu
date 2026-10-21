@@ -421,7 +421,8 @@
 				url.searchParams.set('from', monthOf(month));
 				url.searchParams.set('to', lastOf(month));
 				if (mod) url.searchParams.set('modalite', mod);
-				const promise = fetch(url, { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+				// Après un créneau pris (409), relecture de l'état réel : la réponse est mise en cache 30 s par le navigateur.
+				const promise = fetch(url, { credentials: 'same-origin', headers: { Accept: 'application/json' }, cache: state.fresh ? 'no-cache' : 'default' })
 					.then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
 					.then((data) => {
 						if (!data || !Array.isArray(data.days)) throw new Error('Réponse inattendue');
@@ -447,6 +448,7 @@
 			return state.loads.get(key);
 		}
 		function forgetAvailability() {
+			state.fresh = true;
 			state.loads.clear();
 			state.ready.clear();
 			state.days.clear();
