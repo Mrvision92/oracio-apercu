@@ -1,6 +1,6 @@
 /**
  * Oracio — interactions de l'interface : en-tête, panneaux de navigation, menu mobile,
- * recherche, sommaire des articles. Aucune dépendance.
+ * sommaire des articles. Aucune dépendance.
  */
 (() => {
 	const header = document.querySelector('[data-o-header]');
@@ -92,25 +92,6 @@
 		});
 		window.matchMedia('(min-width: 1140px)').addEventListener('change', (mq) => {
 			if (mq.matches) setOpen(false);
-		});
-	}
-
-	/* Recherche */
-	const searchToggle = document.querySelector('[data-o-search-toggle]');
-	const search = document.getElementById('o-search');
-	if (searchToggle && search) {
-		searchToggle.addEventListener('click', () => {
-			const open = search.hidden;
-			search.hidden = !open;
-			searchToggle.setAttribute('aria-expanded', String(open));
-			if (open) search.querySelector('input').focus();
-		});
-		search.addEventListener('keydown', (event) => {
-			if (event.key === 'Escape') {
-				search.hidden = true;
-				searchToggle.setAttribute('aria-expanded', 'false');
-				searchToggle.focus();
-			}
 		});
 	}
 

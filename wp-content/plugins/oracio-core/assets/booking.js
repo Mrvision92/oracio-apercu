@@ -16,6 +16,11 @@
  *   (sessionStorage) ; jamais le nom, l'e-mail, le téléphone, la société ni les précisions.
  * Point d'entrée : window.OracioBooking.mount(conteneur [data-o-rdv-wizard], options) — montage automatique des
  * assistants présents dans la page ; le panneau (booking-launcher.js) monte celui qu'il charge.
+ * Petit écran et panneau : le pied (statut, résumé, Retour / Continuer) reste collé en bas ; sa hauteur est réservée
+ * sous chaque élément qui peut recevoir le focus (scroll-margin-bottom, booking.css) pour qu'il ne masque jamais
+ * l'élément qui a le focus (WCAG 2.4.11), et le message d'erreur global est alors affiché en tête de l'étape plutôt
+ * que dans le pied. Pendant l'envoi, la racine
+ * porte l'attribut data-o-rdv-sending et l'option onSending(vrai | faux) est appelée (le panneau ne se ferme pas).
  */
 (() => {
 	'use strict';
@@ -280,6 +285,7 @@
 		function setStatus(kind, message, extras = [], focus = false) {
 			if (!status) return;
 			status.className = `o-form__status${kind ? ` is-${kind}` : ''}`;
+			root.classList.toggle('has-status-error', kind === 'error' && !!message);
 			status.textContent = '';
 			if (message) status.appendChild(h('span', { text: message }));
 			extras.filter(Boolean).forEach((text) => {
@@ -293,10 +299,9 @@
 		const layout = h('div', { class: 'o-rdv__layout' });
 		form.parentNode.insertBefore(layout, form);
 
-		// Barre d'étapes (vraie séquence : pastilles numérotées).
+		// Barre d'étapes (vraie séquence : pastilles numérotées ; l'intitulé de l'étape en cours est dit par sa légende).
 		const progressList = h('ol', { class: 'o-rdv-progress__list' });
-		const progressCount = h('p', { class: 'o-rdv-progress__count', 'aria-hidden': 'true' });
-		const progress = h('nav', { class: 'o-rdv-progress', 'aria-label': 'Étapes de la prise de rendez-vous' }, [progressCount, progressList]);
+		const progress = h('nav', { class: 'o-rdv-progress', 'aria-label': 'Étapes de la prise de rendez-vous' }, [progressList]);
 		layout.append(progress, form);
 
 		// Intitulés d'étape : le numéro est porté par la barre d'étapes.
@@ -327,9 +332,11 @@
 		const back = h('button', { type: 'button', class: 'o-btn o-btn--outline o-rdv-nav__back', onclick: () => previous() }, ['Retour']);
 		submit.classList.add('o-btn--arrow', 'o-rdv-nav__next');
 		const dockLine = h('span', { class: 'o-rdv-dock__line' });
-		const dockDetails = h('div', { class: 'o-rdv-dock__details', id: `${uid}-resume-details`, hidden: true });
+		// Détail déplié : zone qui peut défiler (hauteur bornée) ; focalisable et nommée, pour qu'on puisse la faire défiler
+		// au clavier (flèches, Page suivante) et que la note « Il s'agit d'une demande… », placée en tête, soit lue.
+		const dockDetails = h('div', { class: 'o-rdv-dock__details', id: `${uid}-resume-details`, hidden: true, tabindex: '0', role: 'region', 'aria-label': detailsLabel() });
 		const dockToggle = h('button', { type: 'button', class: 'o-rdv-dock__toggle', 'aria-expanded': 'false', 'aria-controls': `${uid}-resume-details` }, [
-			h('span', { class: 'o-rdv-dock__eyebrow', text: 'Votre rendez-vous' }),
+			h('span', { class: 'o-rdv-dock__eyebrow', text: eyebrowText() }),
 			dockLine,
 			h('span', { class: 'o-rdv-dock__chevron', html: icon('chevron') }),
 		]);
@@ -345,13 +352,110 @@
 		form.append(dock);
 		if (actions && !actions.children.length) actions.remove();
 
+		/* ---------- Pied collant : le focus n'est jamais masqué (WCAG 2.4.11) ---------- */
+		const scroller = () => root.closest('.o-rdv-dialog__body');
+		const docked = () => getComputedStyle(dock).position === 'sticky';
+		const rem = () => parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+		/**
+		 * Version compacte de l'étape 3 (semaines passées masquées, heures montrées à l'arrivée) : conteneur étroit, ou
+		 * fenêtre basse (téléphone en paysage, zoom important) où la place manque en hauteur.
+		 */
+		const isCompact = () => root.getBoundingClientRect().width <= 30 * rem() || window.innerHeight <= 30 * rem();
+		/** Message global : en tête de l'étape quand le pied est collant (dans le pied, il le ferait grandir et masquerait le formulaire). */
+		function placeStatus(sticky) {
+			if (!status) return;
+			const step = steps[state.step - 1];
+			const lead = step && step.querySelector('.o-rdv-step__lead');
+			if (sticky && lead) {
+				if (status.previousElementSibling !== lead) lead.after(status);
+			} else if (status.parentNode !== dock) dock.prepend(status);
+		}
+		function syncDock() {
+			const sticky = docked() && !state.done;
+			const height = sticky ? Math.ceil(dock.getBoundingClientRect().height) : 0;
+			// Défilement au clavier : la hauteur du pied est réservée sous les éléments des étapes (scroll-margin-bottom,
+			// classe is-docked), pas sur la page ni le panneau : un scroll-padding s'appliquerait aussi aux boutons du
+			// pied, et chaque Tab sur Retour / Continuer ferait défiler la page pour rien.
+			root.style.setProperty('--o-rdv-dock-h', `${height}px`);
+			root.classList.toggle('is-docked', sticky);
+			const compact = isCompact();
+			if (compact !== state.compact) {
+				state.compact = compact;
+				// Semaines passées affichées ou non : la grille est redessinée, le focus reste sur le jour qui l'avait.
+				const focused = tbody.contains(document.activeElement) ? document.activeElement.dataset.date : '';
+				if (state.month) renderGrid();
+				if (focused) focusDay(focused);
+			}
+			placeStatus(sticky);
+		}
+		// Une mesure par image : syncDock peut déplacer le message global (et changer ces tailles), ce qui, fait dans le
+		// rappel même, relancerait l'observateur (erreur « ResizeObserver loop »).
+		let syncing = 0;
+		if ('ResizeObserver' in window) {
+			const watch = new ResizeObserver(() => {
+				if (!syncing) syncing = requestAnimationFrame(() => ((syncing = 0), syncDock()));
+			});
+			watch.observe(dock);
+			watch.observe(root);
+		}
+		// Hauteur de la fenêtre seule (rotation, zoom) : pied collant ou non (booking.css, fenêtre basse), version compacte.
+		window.addEventListener('resize', () => {
+			if (!syncing) syncing = requestAnimationFrame(() => ((syncing = 0), syncDock()));
+		});
+		/**
+		 * Exécute fn une fois le défilement en cours terminé (défilement doux de la page, ou du navigateur vers le champ
+		 * qui reçoit le focus) : mesurer pendant l'animation donnerait de fausses positions.
+		 */
+		function afterScroll(fn) {
+			const box = scroller() || window;
+			const pos = () => (box === window ? window.scrollY : box.scrollTop);
+			const start = pos();
+			requestAnimationFrame(() =>
+				requestAnimationFrame(() => {
+					// Défilement doux demandé par l'assistant lui-même (smoothTo) : il peut n'avoir pas encore commencé ; on
+					// attend sa fin, sinon un nouveau défilement l'interromprait à mi-course.
+					if (pos() === start && !smoothPending) return fn();
+					let timer = 0;
+					const run = () => {
+						clearTimeout(timer);
+						box.removeEventListener('scrollend', run);
+						smoothPending = false;
+						fn();
+					};
+					box.addEventListener('scrollend', run);
+					timer = setTimeout(run, smoothPending ? 1500 : 1000); // navigateurs sans « scrollend »
+				})
+			);
+		}
+		/** Fait défiler la page jusqu'au haut de l'assistant (défilement doux, sauf mouvement réduit). */
+		let smoothPending = false;
+		let smoothTimer = 0;
+		function smoothTo() {
+			smoothPending = !reduced();
+			clearTimeout(smoothTimer);
+			smoothTimer = setTimeout(() => (smoothPending = false), 1500);
+			root.scrollIntoView({ block: 'start', behavior: reduced() ? 'auto' : 'smooth' });
+		}
+		// Filet de sécurité : un champ qui reçoit le focus sous le pied collant est remonté au-dessus.
+		form.addEventListener('focusin', (event) => {
+			const target = event.target;
+			if (dock.contains(target)) return;
+			afterScroll(() => {
+				if (!docked() || document.activeElement !== target) return;
+				const bottom = (target.closest('label') || target).getBoundingClientRect().bottom;
+				const limit = dock.getBoundingClientRect().top - 8;
+				// « auto » : défilement doux de la page, sauf mouvement réduit (base.css).
+				if (bottom > limit) (scroller() || window).scrollBy({ top: bottom - limit + 16, behavior: 'auto' });
+			});
+		});
+
 		// Récapitulatif persistant (grand écran).
 		const summaryList = h('dl', { class: 'o-rdv-summary__list' });
 		const summaryNote = h('p', { class: 'o-rdv-summary__note' });
 		const help = h('p', { class: 'o-rdv-summary__help' });
 		if (cabinet.phone && cabinet.tel) help.append('Une question ? ', h('a', { href: cabinet.tel, text: cabinet.phone }));
 		const aside = h('aside', { class: 'o-rdv-summary', 'aria-labelledby': `${uid}-resume-titre` }, [
-			h('div', { class: 'o-rdv-summary__card' }, [h('p', { class: 'o-rdv-summary__eyebrow', id: `${uid}-resume-titre`, text: 'Votre rendez-vous' }), summaryList, summaryNote, help]),
+			h('div', { class: 'o-rdv-summary__card' }, [h('p', { class: 'o-rdv-summary__eyebrow', id: `${uid}-resume-titre`, text: eyebrowText() }), summaryList, summaryNote, help]),
 		]);
 		layout.append(aside);
 
@@ -459,7 +563,9 @@
 
 		function renderGrid() {
 			const m = state.month;
-			monthTitle.textContent = cap(monthLabel(m));
+			// Région vivante : réécrite seulement si le mois change (sinon chaque flèche serait annoncée deux fois).
+			const title = cap(monthLabel(m));
+			if (monthTitle.textContent !== title) monthTitle.textContent = title;
 			prevBtn.setAttribute('aria-disabled', String(m <= minMonth()));
 			nextBtn.setAttribute('aria-disabled', String(m >= maxMonth()));
 			const loading = !monthReady(m);
@@ -472,15 +578,20 @@
 			for (let i = 0; i < offset; i++) row.append(h('td'));
 			let focusable = '';
 			const candidates = [];
+			// Petit écran : les semaines entièrement avant le premier jour possible ne sont pas affichées (place gagnée
+			// pour les jours et les heures disponibles).
+			const hidePast = state.compact && ISO.test(state.meta.min || '');
+			let rowFuture = !hidePast;
 			for (let d = 1; d <= count; d++) {
 				const iso = `${m.slice(0, 7)}-${pad(d)}`;
 				const info = dayInfo(iso);
 				const open = info.status === 'open';
 				const selected = iso === state.date;
-				// Nom complet lu par les lecteurs d'écran (« jeudi 22 octobre 2026, disponible ») : le chiffre visible en fait
-				// partie (critère 2.5.3, étiquette dans le nom), le reste est en texte masqué.
+				// Nom complet (« jeudi 1er octobre 2026, date passée ») en aria-label : commence par le jour puis le texte
+				// visible (critère 2.5.3) ; « 1er » lu « premier » (et non « 1 e r »).
 				const date = fromIso(iso);
-				const rest = [`${d === 1 ? 'er' : ''} ${MONTHS[date.getMonth()]} ${date.getFullYear()}`, iso === today ? 'aujourd’hui' : '', info.status === 'loading' ? 'chargement' : statusText(iso, info), selected ? 'jour choisi' : ''].filter(Boolean).join(', ');
+				const name = [longDate(iso), iso === today ? 'aujourd’hui' : '', info.status === 'loading' ? 'chargement' : statusText(iso, info), selected ? 'jour choisi' : ''].filter(Boolean).join(', ');
+				if (!hidePast || iso >= state.meta.min) rowFuture = true;
 				const btn = h(
 					'button',
 					{
@@ -491,16 +602,19 @@
 						'aria-pressed': String(selected),
 						'aria-disabled': open ? null : 'true',
 						'aria-current': iso === today ? 'date' : null,
+						'aria-label': name,
 						'data-tip': open || info.status === 'loading' ? null : cap(statusText(iso, info)),
 					},
-					[h('span', { class: 'screen-reader-text', text: `${DAYS[date.getDay()]} ` }), String(d), h('span', { class: 'screen-reader-text', text: rest })]
+					// Le 1er du mois s'écrit « 1er » (usage français) : le texte visible figure tel quel dans le nom (2.5.3).
+					[h('span', { 'aria-hidden': 'true' }, d === 1 ? ['1', h('span', { class: 'o-cal__ord', text: 'er' })] : String(d))]
 				);
 				row.append(h('td', {}, btn));
 				if (selected) focusable = iso;
 				if (open) candidates.push(iso);
 				if ((offset + d) % 7 === 0) {
-					rows.push(row);
+					if (rowFuture) rows.push(row);
 					row = h('tr');
+					rowFuture = !hidePast;
 				}
 			}
 			if (row.children.length) {
@@ -556,12 +670,14 @@
 			return p;
 		}
 
-		function focusDay(iso) {
+		function focusDay(iso, preventScroll = false) {
 			const btn = (iso && tbody.querySelector(`[data-date="${iso}"]`)) || tbody.querySelector('.o-cal__day[tabindex="0"]');
-			if (btn) btn.focus();
+			if (btn) btn.focus({ preventScroll });
 		}
 		async function moveTo(iso) {
-			const lo = minMonth();
+			// Petit écran : pas de déplacement vers une semaine masquée (entièrement avant le premier jour possible).
+			const min = state.meta.min || '';
+			const lo = state.compact && ISO.test(min) ? [minMonth(), addDays(min, -weekday(min))].sort()[1] : minMonth();
 			const hi = lastOf(maxMonth());
 			const target = iso < lo ? lo : iso > hi ? hi : iso;
 			state.focusDate = target;
@@ -673,8 +789,39 @@
 			enterDateStep();
 		}
 
+		/**
+		 * Petit écran (ou fenêtre basse), arrivée à l'étape 3 : si les premières heures sont sous le pied collant (ou sous
+		 * le bas de la zone visible), la page (ou le panneau) défile juste assez pour les montrer, sans jamais faire
+		 * passer la semaine du jour choisi au-dessus du haut de la zone visible ; rien ne bouge quand elles sont déjà
+		 * visibles. Si l'intitulé de l'étape, qui a le focus, sort alors de la zone visible, le focus passe au jour
+		 * choisi (visible, son nom complet annonce la date) : jamais de focus hors de la vue.
+		 */
+		function showChosenWeek() {
+			if (!state.compact) return;
+			afterScroll(() => {
+				// Le visiteur a déjà avancé (focus déplacé dans l'assistant) : on ne déplace plus la page sous ses yeux.
+				const active = document.activeElement;
+				if (state.step !== 3 || (active !== legends[2] && root.contains(active))) return;
+				const day = tbody.querySelector('.o-cal__day.is-selected');
+				const slot = slotBox.querySelector('.o-slot');
+				if (!day || !slot) return;
+				const box = scroller();
+				// Haut de la zone visible : sous l'en-tête collant du site (scroll-padding-top de base.css), ou haut du panneau.
+				const top = box ? box.getBoundingClientRect().top : parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop) || 0;
+				const bottom = docked() ? dock.getBoundingClientRect().top : box ? box.getBoundingClientRect().bottom : window.innerHeight;
+				const need = slot.getBoundingClientRect().bottom - (bottom - 16);
+				const room = day.closest('tr').getBoundingClientRect().top - top;
+				if (!(need > 0 && room > 0)) return;
+				(box || window).scrollBy({ top: Math.min(need, room), behavior: 'auto' });
+				afterScroll(() => {
+					if (document.activeElement !== legends[2] || state.step !== 3) return;
+					if (legends[2].getBoundingClientRect().top < top) focusDay(state.date, true);
+				});
+			});
+		}
+
 		/** Entrée dans l'étape 3 : mois du jour choisi (ou premier jour disponible), créneaux, vérifications. */
-		async function enterDateStep() {
+		async function enterDateStep(arrive = false) {
 			if (state.fallback) return;
 			const wanted = state.date;
 			slotsLoading();
@@ -686,6 +833,7 @@
 					state.slotWanted = state.slot;
 					selectDay(wanted, false);
 					state.slotStale = false;
+					if (arrive) showChosenWeek();
 					return;
 				}
 				if (info) setError('date_souhaitee', `${cap(longDate(wanted))} n’est plus disponible : ${statusText(wanted, info)}. Choisissez un autre jour.`);
@@ -703,6 +851,7 @@
 			if (first) {
 				if (first.slice(0, 7) !== state.month.slice(0, 7)) await showMonth(monthOf(first));
 				selectDay(first, false);
+				if (arrive) showChosenWeek();
 			} else {
 				slotsPlaceholder('Aucune heure disponible pour le moment.');
 				calMsg.replaceChildren(contactSentence('Aucun créneau n’est disponible en ligne pour le moment.'));
@@ -807,21 +956,28 @@
 						h('dd', {}, [h('span', { text: value || 'À choisir' }), sub ? h('span', { class: 'o-rdv-summary__sub', text: sub }) : null]),
 					])
 				);
-			// Liste lue par les lecteurs d'écran : seules les lignes modifiées sont remplacées.
+			// Seules les lignes modifiées sont remplacées. Pas de région vivante : le choix est déjà annoncé par le contrôle
+			// qui a le focus et par le message du calendrier.
 			const fresh = build();
 			fresh.forEach((row, i) => {
 				const old = summaryList.children[i];
 				if (!old) summaryList.append(row);
 				else if (old.textContent !== row.textContent) old.replaceWith(row);
 			});
-			if (!summaryList.hasAttribute('aria-live')) summaryList.setAttribute('aria-live', 'polite');
-			dockDetails.replaceChildren(h('dl', { class: 'o-rdv-summary__list' }, build()), h('p', { class: 'o-rdv-summary__note', text: noteText() }));
+			dockDetails.replaceChildren(h('p', { class: 'o-rdv-summary__note', text: noteText() }), h('dl', { class: 'o-rdv-summary__list' }, build()));
 			const c = choices();
 			// Date et heure d'abord : l'information la plus utile quand la ligne est tronquée.
 			const line = [ISO.test(c.date || '') ? shortDate(c.date) : '', c.slot && isTime(c.slot) ? c.slot : '', c.objet].filter(Boolean).join(' · ');
 			dockLine.textContent = line;
 			dockSummary.hidden = !line;
 			summaryNote.textContent = noteText();
+		}
+		// Demande (par défaut) ou réservation (confirmation automatique) : le titre du résumé le dit.
+		function eyebrowText() {
+			return state.meta.autoConfirm ? 'Votre rendez-vous' : 'Votre demande';
+		}
+		function detailsLabel() {
+			return state.meta.autoConfirm ? 'Détail de votre rendez-vous' : 'Détail de votre demande';
 		}
 		const noteText = () =>
 			state.meta.autoConfirm
@@ -869,13 +1025,14 @@
 
 		function updateTexts() {
 			submitLabel();
+			root.querySelectorAll('.o-rdv-dock__eyebrow, .o-rdv-summary__eyebrow').forEach((el) => (el.textContent = eyebrowText()));
+			dockDetails.setAttribute('aria-label', detailsLabel());
 			renderSummary();
 			if (state.step === 5) renderRecap();
 		}
 
 		/* ---------- Barre d'étapes, boutons ---------- */
 		function renderProgress() {
-			progressCount.textContent = `Étape ${state.step} sur 5 · ${STEP_TITLES[state.step - 1]}`;
 			progressList.replaceChildren(
 				...STEP_TITLES.map((title, i) => {
 					const n = i + 1;
@@ -914,7 +1071,7 @@
 				return;
 			}
 			const top = root.getBoundingClientRect().top;
-			if (top < 0 || top > window.innerHeight * 0.6) root.scrollIntoView({ block: 'start', behavior: reduced() ? 'auto' : 'smooth' });
+			if (top < 0 || top > window.innerHeight * 0.6) smoothTo();
 		}
 
 		function go(n, focus = true) {
@@ -923,7 +1080,8 @@
 			steps.forEach((el, i) => (el.hidden = i + 1 !== state.step));
 			root.dataset.step = String(state.step);
 			setStatus('', '');
-			if (state.step === 3) state.dateStep = enterDateStep();
+			placeStatus(docked());
+			if (state.step === 3) state.dateStep = enterDateStep(focus);
 			if (state.step === 4) getToken().catch(() => {});
 			if (state.step === 5) renderRecap();
 			renderNav();
@@ -954,14 +1112,19 @@
 			}
 			go(state.step + 1);
 		}
+		// Pendant l'envoi, aucune navigation : la demande part avec les choix du récapitulatif (les boutons restent
+		// focalisables, aria-disabled, pour que le focus ne soit pas perdu).
 		function previous() {
+			if (state.sending) return;
 			if (state.step > 1) go(state.step - 1);
 		}
 		function jump(n) {
+			if (state.sending) return;
 			const first = firstInvalidBefore(n);
 			go(first || n);
 		}
 		function edit(n) {
+			if (state.sending) return;
 			state.editing = true;
 			go(n);
 		}
@@ -1042,11 +1205,15 @@
 				return;
 			}
 			state.sending = true;
+			root.setAttribute('data-o-rdv-sending', '');
+			if (opts.onSending) opts.onSending(true);
+			// aria-disabled plutôt que disabled : un bouton désactivé perdrait le focus (renvoyé sur la page) pendant tout
+			// l'envoi ; ici le focus reste sur « Envoyer », et l'envoi est annoncé par la zone de statut.
 			submit.setAttribute('aria-busy', 'true');
-			submit.disabled = true;
-			back.disabled = true;
+			submit.setAttribute('aria-disabled', 'true');
+			back.setAttribute('aria-disabled', 'true');
 			submit.textContent = 'Envoi en cours…';
-			setStatus('', '');
+			setStatus('', 'Envoi en cours…');
 			try {
 				form.elements.jeton.value = await getToken();
 				// Délai minimal anti-robot : le jeton doit avoir au moins 3 secondes.
@@ -1090,9 +1257,11 @@
 				setStatus('error', `${M.error || 'Une erreur est survenue.'} Vérifiez votre connexion.`, [], true);
 			} finally {
 				state.sending = false;
+				root.removeAttribute('data-o-rdv-sending');
+				if (opts.onSending) opts.onSending(false);
 				submit.removeAttribute('aria-busy');
-				submit.disabled = false;
-				back.disabled = false;
+				submit.removeAttribute('aria-disabled');
+				back.removeAttribute('aria-disabled');
 				if (!state.done) submitLabel();
 			}
 		}
@@ -1167,6 +1336,7 @@
 			layout.hidden = true;
 			root.classList.add('is-done');
 			root.append(panel);
+			syncDock();
 			// Données saisies retirées de la page (le formulaire n'est plus utilisé).
 			form.reset();
 			const scroller = root.closest('.o-rdv-dialog__body');
@@ -1256,19 +1426,27 @@
 			if (missing) start = missing;
 		}
 		state.maxStep = start;
+		state.compact = isCompact();
 		go(start, !!opts.focus);
+		syncDock();
 
 		return {
 			root,
 			/** Affiche l'assistant (page Contact ou panneau rouvert) avec d'éventuelles valeurs initiales. */
 			reveal(prefill) {
-				if (state.done) return;
-				const values = normalize(prefill);
+				if (state.done) {
+					const done = root.querySelector('.o-rdv-done__title');
+					if (!root.closest('dialog')) smoothTo();
+					if (done) done.focus({ preventScroll: true });
+					return;
+				}
+				// Envoi en cours : les choix ne changent plus (la demande est partie avec ceux du récapitulatif).
+				const values = state.sending ? {} : normalize(prefill);
 				applyPrefill(values);
 				refresh();
 				if (state.step === 3 && values.modalite) enterDateStep();
 				if (!root.closest('dialog')) {
-					root.scrollIntoView({ block: 'start', behavior: reduced() ? 'auto' : 'smooth' });
+					smoothTo();
 				}
 				legends[state.step - 1].focus({ preventScroll: true });
 			},

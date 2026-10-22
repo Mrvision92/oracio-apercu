@@ -5,9 +5,11 @@
  * prise de rendez-vous dans un panneau modal (<dialog>) sans quitter la page. Le formulaire (rendu par le serveur,
  * jeton inclus : GET /oracio/v1/booking/form) et le script de l'assistant (booking.js) ne sont chargés qu'au
  * survol du lien ou à la première ouverture ; aucune requête vers un autre site.
- * Valeurs initiales non personnelles : data-o-rdv-objet, data-o-rdv-profil, data-o-rdv-modalite (listes blanches,
- * contrôlées par booking.js et par le serveur).
+ * Valeurs initiales non personnelles : data-o-rdv-objet, data-o-rdv-profil, data-o-rdv-modalite, ou paramètres
+ * ?objet=&profil=&modalite= de l'adresse du lien (listes blanches, contrôlées par booking.js et par le serveur).
  * Sur une page qui affiche déjà l'assistant (page Contact), le lien fait défiler jusqu'à lui.
+ * Pendant l'envoi, Échap et × (aria-disabled) ne ferment pas le panneau ; une demande aboutie panneau fermé est
+ * montrée (écran de succès) à la réouverture, jamais un formulaire vierge.
  * Sans JavaScript, ou si le chargement échoue, le lien mène à la page Contact où le formulaire complet fonctionne.
  * Configuration : window.OracioRdv (includes/booking-form.php).
  */
@@ -31,10 +33,18 @@
 		const el = node && node.closest ? node.closest('a[href], [data-o-rdv]') : null;
 		return el && isTrigger(el) ? el : null;
 	};
+	// Valeurs initiales : paramètres ?objet=&profil=&modalite= de l'adresse du lien, puis attributs data-o-rdv-*
+	// (prioritaires). Listes blanches appliquées par booking.js et par le serveur.
 	const prefillOf = (el) => {
 		const out = {};
+		let params = null;
+		try {
+			params = el.href ? new URL(el.href, location.href).searchParams : null;
+		} catch (e) {
+			params = null;
+		}
 		['objet', 'profil', 'modalite'].forEach((key) => {
-			const value = el.getAttribute(`data-o-rdv-${key}`);
+			const value = el.getAttribute(`data-o-rdv-${key}`) || (params && params.get(key));
 			if (value) out[key] = value;
 		});
 		return out;
@@ -70,9 +80,11 @@
 
 	let dialog = null;
 	let body = null;
+	let closeBtn = null;
 	let trigger = null;
 	let instance = null; // assistant monté dans le panneau
 	let finished = false; // demande envoyée : un nouveau formulaire sera chargé à la prochaine ouverture
+	let unseen = false; // demande aboutie panneau fermé : écran de succès à montrer à la réouverture
 	let prefetched = null; // formulaire chargé d'avance (survol, focus)
 	let busy = false; // chargement du panneau en cours
 
@@ -98,10 +110,13 @@
 			`<button type="button" class="o-rdv-dialog__close">${svg('M6 6l12 12M18 6 6 18')}<span class="screen-reader-text">Fermer la prise de rendez-vous</span></button>` +
 			'</div><div class="o-rdv-dialog__body"></div>';
 		body = dialog.querySelector('.o-rdv-dialog__body');
-		dialog.querySelector('.o-rdv-dialog__close').addEventListener('click', () => dialog.close());
+		closeBtn = dialog.querySelector('.o-rdv-dialog__close');
+		const sending = () => !!body.querySelector('[data-o-rdv-sending]');
+		closeBtn.addEventListener('click', () => sending() || dialog.close());
+		dialog.addEventListener('cancel', (e) => sending() && e.preventDefault());
 		dialog.addEventListener('close', () => {
 			document.documentElement.classList.remove('o-rdv-locked');
-			if (finished) {
+			if (finished && !unseen) {
 				instance = null;
 				body.textContent = '';
 			}
@@ -150,16 +165,26 @@
 		return box;
 	}
 
-	async function open(el, prefill) {
-		trigger = el;
-		if (!dialog) build();
-		// Menu mobile ouvert : il est refermé (le panneau prend le relais).
+	// Lien du menu mobile : menu refermé (son bouton ne déplace pas le focus) avant d'afficher l'assistant.
+	function closeDrawer(el) {
 		const drawer = el.closest('[data-o-drawer]');
 		const toggle = document.querySelector('[data-o-drawer-toggle]');
 		if (drawer && !drawer.hidden && toggle) toggle.click();
+	}
+
+	async function open(el, prefill) {
+		trigger = el;
+		if (!dialog) build();
+		closeDrawer(el);
 		document.documentElement.classList.add('o-rdv-locked');
 		if (!dialog.open) dialog.showModal();
 
+		if (instance && unseen) {
+			unseen = false;
+			const done = body.querySelector('.o-rdv-done__title');
+			if (done) done.focus();
+			return;
+		}
 		if (instance && !finished) {
 			instance.reveal(prefill);
 			return;
@@ -179,7 +204,11 @@
 				prefill,
 				focus: dialog.open,
 				close: () => dialog.close(),
-				onDone: () => (finished = true),
+				onSending: (on) => (on ? closeBtn.setAttribute('aria-disabled', 'true') : closeBtn.removeAttribute('aria-disabled')),
+				onDone: () => {
+					finished = true;
+					unseen = !dialog.open;
+				},
 			});
 			if (!instance) throw new Error('mount');
 		} catch (e) {
@@ -201,6 +230,7 @@
 		if (inline) {
 			if (inline.oracioBooking) {
 				event.preventDefault();
+				closeDrawer(el);
 				inline.oracioBooking.reveal(prefill);
 			}
 			return;
