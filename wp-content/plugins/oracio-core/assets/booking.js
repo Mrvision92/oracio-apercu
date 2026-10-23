@@ -1042,7 +1042,7 @@
 		}
 		const noteText = () =>
 			state.meta.autoConfirm
-				? 'Réservation en ligne : le créneau vous est réservé dès l’envoi, et la confirmation vous est envoyée par e-mail.'
+				? 'Réservation en ligne : le créneau vous est réservé dès l’envoi, et la confirmation est envoyée à votre adresse e-mail, sauf si la limite des envois automatiques est atteinte.'
 				: 'Il s’agit d’une demande : notre équipe vous confirme le rendez-vous par e-mail ou par téléphone.';
 
 		function renderRecap() {
