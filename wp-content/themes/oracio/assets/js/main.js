@@ -90,7 +90,9 @@
 				if (first) first.focus();
 			}
 		});
-		window.matchMedia('(min-width: 1140px)').addEventListener('change', (mq) => {
+		// Même seuil que header.css (navigation affichée, bouton Menu masqué à partir de 1100 px) : sinon, entre 1100 et
+		// 1139 px, un menu ouvert restait affiché, page bloquée, sans bouton pour le fermer.
+		window.matchMedia('(min-width: 1100px)').addEventListener('change', (mq) => {
 			if (mq.matches) setOpen(false);
 		});
 	}
@@ -300,27 +302,33 @@
 	});
 
 	let pending = targets.slice();
+	// Toutes les positions sont lues avant d'écrire les classes : pas de recalcul de style forcé à chaque élément.
 	const reveal = () => {
 		const limit = window.innerHeight * 0.9;
+		const due = [];
 		pending = pending.filter((el) => {
 			if (el.getBoundingClientRect().top < limit) {
-				el.classList.add('is-in');
+				due.push(el);
 				return false;
 			}
 			return true;
 		});
+		due.forEach((el) => el.classList.add('is-in'));
 	};
 
 	// Parallaxe légère des grandes photos.
 	const parallax = [...document.querySelectorAll('.o-hero__photo, .o-bento__photo, .o-sector__photo, .o-page-hero figure')];
 	parallax.forEach((el) => el.setAttribute('data-parallax', ''));
+	// Même principe : lecture de toutes les positions, puis écriture des décalages.
 	const drift = () => {
 		const vh = window.innerHeight;
-		parallax.forEach((el) => {
+		const offsets = parallax.map((el) => {
 			const r = el.getBoundingClientRect();
-			if (r.bottom < -100 || r.top > vh + 100) return;
-			const offset = Math.max(-30, Math.min(30, -(r.top + r.height / 2 - vh / 2) * 0.06));
-			el.style.setProperty('--o-py', `${offset.toFixed(1)}px`);
+			if (r.bottom < -100 || r.top > vh + 100) return null;
+			return Math.max(-30, Math.min(30, -(r.top + r.height / 2 - vh / 2) * 0.06));
+		});
+		parallax.forEach((el, i) => {
+			if (offsets[i] !== null) el.style.setProperty('--o-py', `${offsets[i].toFixed(1)}px`);
 		});
 	};
 

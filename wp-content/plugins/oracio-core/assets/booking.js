@@ -416,10 +416,13 @@
 					// attend sa fin, sinon un nouveau défilement l'interromprait à mi-course.
 					if (pos() === start && !smoothPending) return fn();
 					let timer = 0;
-					const run = () => {
+					const run = (event) => {
+						// « scrollend » d'un défilement antérieur (clic, focus), arrivé alors que le défilement doux demandé
+						// depuis n'est pas fini (ou pas commencé) : on attend la fin de celui-ci. smoothPending n'est remis à
+						// faux que par expectScroll, à la fin de ce défilement.
+						if (event && smoothPending) return;
 						clearTimeout(timer);
 						box.removeEventListener('scrollend', run);
-						smoothPending = false;
 						fn();
 					};
 					box.addEventListener('scrollend', run);
@@ -427,21 +430,76 @@
 				})
 			);
 		}
-		/** Fait défiler la page jusqu'au haut de l'assistant (défilement doux, sauf mouvement réduit). */
+		/** Haut utile de la page : sous l'en-tête fixe du site (scroll-padding-top de base.css). */
+		const pageTop = () => parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop) || 0;
 		let smoothPending = false;
-		let smoothTimer = 0;
+		let smoothStop = () => {};
+		/**
+		 * Défilement doux de la page demandé par l'assistant, vers la position target : afterScroll attend qu'il soit fini.
+		 * Il l'est au premier « scrollend » à cette position ; un « scrollend » reçu avant vient d'un défilement antérieur
+		 * (clic, focus) et ne doit pas faire croire aux mesures que la page est déjà à sa place.
+		 */
+		function expectScroll(target) {
+			smoothStop();
+			const max = document.documentElement.scrollHeight - window.innerHeight;
+			const to = Math.max(0, Math.min(max, target));
+			smoothPending = !reduced() && Math.abs(window.scrollY - to) > 2;
+			if (!smoothPending) return;
+			let timer = 0;
+			const onEnd = () => Math.abs(window.scrollY - to) <= 2 && smoothStop();
+			smoothStop = () => {
+				clearTimeout(timer);
+				window.removeEventListener('scrollend', onEnd);
+				smoothPending = false;
+				smoothStop = () => {};
+			};
+			window.addEventListener('scrollend', onEnd);
+			timer = setTimeout(smoothStop, 1500); // navigateurs sans « scrollend », ou défilement interrompu
+		}
+		/**
+		 * Décalage vertical en cours des ancêtres (translate / transform), par exemple l'apparition au défilement du
+		 * thème (bloc pas encore apparu : translate 0 44px). Il disparaît pendant le défilement : la cible n'en tient pas
+		 * compte.
+		 */
+		function pendingShift(el) {
+			let y = 0;
+			for (let p = el; p && p !== document.documentElement; p = p.parentElement) {
+				const cs = getComputedStyle(p);
+				const t = cs.translate && cs.translate !== 'none' ? cs.translate.split(' ')[1] || '' : '';
+				if (t.endsWith('px')) y += parseFloat(t) || 0;
+				if (cs.transform && cs.transform !== 'none' && 'DOMMatrixReadOnly' in window) y += new DOMMatrixReadOnly(cs.transform).m42;
+			}
+			return y;
+		}
+		/**
+		 * Fait défiler la page jusqu'au haut de l'assistant, sous l'en-tête fixe (scroll-padding-top), défilement doux sauf
+		 * mouvement réduit. Position calculée sans le décalage d'apparition : scrollIntoView le comptait et, depuis le haut
+		 * de la page Contact, l'assistant finissait 44 px trop haut, sa barre d'étapes sous l'en-tête.
+		 */
 		function smoothTo() {
-			smoothPending = !reduced();
-			clearTimeout(smoothTimer);
-			smoothTimer = setTimeout(() => (smoothPending = false), 1500);
-			root.scrollIntoView({ block: 'start', behavior: reduced() ? 'auto' : 'smooth' });
+			const margin = parseFloat(getComputedStyle(root).scrollMarginTop) || 0;
+			const target = Math.max(0, Math.round(window.scrollY + root.getBoundingClientRect().top - pendingShift(root) - pageTop() - margin));
+			expectScroll(target);
+			window.scrollTo({ top: target, behavior: reduced() ? 'auto' : 'smooth' });
 		}
 		// Filet de sécurité : un champ qui reçoit le focus sous le pied collant est remonté au-dessus.
 		form.addEventListener('focusin', (event) => {
 			const target = event.target;
 			if (dock.contains(target)) return;
 			afterScroll(() => {
-				if (!docked() || document.activeElement !== target) return;
+				if (document.activeElement !== target) return;
+				// Champ (avec son libellé placé au-dessus) passé sous l'en-tête fixe du site, ou au-dessus du haut du panneau :
+				// au Maj+Tab, le navigateur s'arrête au bord du champ et laisse son libellé hors de la vue.
+				let top = (target.closest('label') || target).getBoundingClientRect().top;
+				const lab = !target.closest('label') && target.labels && target.labels[0];
+				if (lab) {
+					const lt = lab.getBoundingClientRect().top;
+					if (lt < top && top - lt < 120) top = lt;
+				}
+				// Même haut utile que showChosenWeek (haut du panneau, ou bas de l'en-tête + 1rem).
+				const edge = scroller() ? scroller().getBoundingClientRect().top : pageTop();
+				if (top < edge - 1) return (scroller() || window).scrollBy({ top: top - edge, behavior: 'auto' });
+				if (!docked()) return;
 				const bottom = (target.closest('label') || target).getBoundingClientRect().bottom;
 				const limit = dock.getBoundingClientRect().top - 8;
 				// « auto » : défilement doux de la page, sauf mouvement réduit (base.css).
@@ -807,12 +865,15 @@
 				if (!day || !slot) return;
 				const box = scroller();
 				// Haut de la zone visible : sous l'en-tête collant du site (scroll-padding-top de base.css), ou haut du panneau.
-				const top = box ? box.getBoundingClientRect().top : parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop) || 0;
+				const top = box ? box.getBoundingClientRect().top : pageTop();
 				const bottom = docked() ? dock.getBoundingClientRect().top : box ? box.getBoundingClientRect().bottom : window.innerHeight;
 				const need = slot.getBoundingClientRect().bottom - (bottom - 16);
 				const room = day.closest('tr').getBoundingClientRect().top - top;
 				if (!(need > 0 && room > 0)) return;
-				(box || window).scrollBy({ top: Math.min(need, room), behavior: 'auto' });
+				const by = Math.min(need, room);
+				// Page : défilement doux (base.css) suivi comme celui de smoothTo, pour mesurer la légende à sa fin seulement.
+				if (!box) expectScroll(window.scrollY + by);
+				(box || window).scrollBy({ top: by, behavior: 'auto' });
 				afterScroll(() => {
 					if (document.activeElement !== legends[2] || state.step !== 3) return;
 					if (legends[2].getBoundingClientRect().top < top) focusDay(state.date, true);
@@ -1070,8 +1131,9 @@
 				scroller.scrollTo({ top: 0, behavior: 'auto' });
 				return;
 			}
+			// Haut de l'assistant caché sous l'en-tête fixe, ou trop bas dans l'écran : on y revient.
 			const top = root.getBoundingClientRect().top;
-			if (top < 0 || top > window.innerHeight * 0.6) smoothTo();
+			if (top < pageTop() - 1 || top > window.innerHeight * 0.6) smoothTo();
 		}
 
 		function go(n, focus = true) {
